@@ -393,15 +393,17 @@ func (dao *Simple) GetBlock(hash util.Uint256) (*block.Block, error) {
 
 // Version represents current dao version.
 type Version struct {
-	StoragePrefix     storage.KeyPrefix
-	StateRootInHeader bool
-	P2PSigExtensions  bool
-	Value             string
+	StoragePrefix       storage.KeyPrefix
+	StateRootInHeader   bool
+	P2PSigExtensions    bool
+	KeepOnlyLatestState bool
+	Value               string
 }
 
 const (
 	stateRootInHeaderBit = 1 << iota
 	p2pSigExtensionsBit
+	keepOnlyLatestStateBit
 )
 
 // FromBytes decodes v from a byte-slice.
@@ -426,6 +428,7 @@ func (v *Version) FromBytes(data []byte) error {
 	v.StoragePrefix = storage.KeyPrefix(data[i+1])
 	v.StateRootInHeader = data[i+2]&stateRootInHeaderBit != 0
 	v.P2PSigExtensions = data[i+2]&p2pSigExtensionsBit != 0
+	v.KeepOnlyLatestState = data[i+2]&keepOnlyLatestStateBit != 0
 	return nil
 }
 
@@ -437,6 +440,9 @@ func (v *Version) Bytes() []byte {
 	}
 	if v.P2PSigExtensions {
 		mask |= p2pSigExtensionsBit
+	}
+	if v.KeepOnlyLatestState {
+		mask |= keepOnlyLatestStateBit
 	}
 	return append([]byte(v.Value), '\x00', byte(v.StoragePrefix), mask)
 }

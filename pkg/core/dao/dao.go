@@ -74,22 +74,20 @@ type DAO interface {
 
 // Simple is memCached wrapper around DB, simple DAO implementation.
 type Simple struct {
-	StoragePrefix storage.KeyPrefix
-	Store         *storage.MemCachedStore
-	// stateRootInHeader specifies if block header contains state root.
-	stateRootInHeader bool
-	// p2pSigExtensions denotes whether P2PSignatureExtensions are enabled.
-	p2pSigExtensions bool
+	Version Version
+	Store   *storage.MemCachedStore
 }
 
 // NewSimple creates new simple dao using provided backend store.
 func NewSimple(backend storage.Store, stateRootInHeader bool, p2pSigExtensions bool) *Simple {
 	st := storage.NewMemCachedStore(backend)
 	return &Simple{
-		StoragePrefix:     storage.STStorage,
-		Store:             st,
-		stateRootInHeader: stateRootInHeader,
-		p2pSigExtensions:  p2pSigExtensions,
+		Version: Version{
+			StoragePrefix:     storage.STStorage,
+			StateRootInHeader: stateRootInHeader,
+			P2PSigExtensions:  p2pSigExtensions,
+		},
+		Store: st,
 	}
 }
 
@@ -101,8 +99,8 @@ func (dao *Simple) GetBatch() *storage.MemBatch {
 // GetWrapped returns new DAO instance with another layer of wrapped
 // MemCachedStore around the current DAO Store.
 func (dao *Simple) GetWrapped() DAO {
-	d := NewSimple(dao.Store, dao.stateRootInHeader, dao.p2pSigExtensions)
-	d.StoragePrefix = dao.StoragePrefix
+	d := NewSimple(dao.Store, dao.Version.StateRootInHeader, dao.Version.P2PSigExtensions)
+	d.Version = dao.Version
 	return d
 }
 
@@ -299,7 +297,7 @@ func (dao *Simple) PutAppExecResult(aer *state.AppExecResult, buf *io.BufBinWrit
 
 // GetStorageItem returns StorageItem if it exists in the given store.
 func (dao *Simple) GetStorageItem(id int32, key []byte) state.StorageItem {
-	b, err := dao.Store.Get(makeStorageItemKey(dao.StoragePrefix, id, key))
+	b, err := dao.Store.Get(makeStorageItemKey(dao.Version.StoragePrefix, id, key))
 	if err != nil {
 		return nil
 	}
@@ -309,14 +307,14 @@ func (dao *Simple) GetStorageItem(id int32, key []byte) state.StorageItem {
 // PutStorageItem puts given StorageItem for given id with given
 // key into the given store.
 func (dao *Simple) PutStorageItem(id int32, key []byte, si state.StorageItem) error {
-	stKey := makeStorageItemKey(dao.StoragePrefix, id, key)
+	stKey := makeStorageItemKey(dao.Version.StoragePrefix, id, key)
 	return dao.Store.Put(stKey, si)
 }
 
 // DeleteStorageItem drops storage item for the given id with the
 // given key from the store.
 func (dao *Simple) DeleteStorageItem(id int32, key []byte) error {
-	stKey := makeStorageItemKey(dao.StoragePrefix, id, key)
+	stKey := makeStorageItemKey(dao.Version.StoragePrefix, id, key)
 	return dao.Store.Delete(stKey)
 }
 
@@ -345,7 +343,7 @@ func (dao *Simple) GetStorageItemsWithPrefix(id int32, prefix []byte) ([]state.S
 // Seek executes f for all items with a given prefix.
 // If key is to be used outside of f, they may not be copied.
 func (dao *Simple) Seek(id int32, prefix []byte, f func(k, v []byte)) {
-	lookupKey := makeStorageItemKey(dao.StoragePrefix, id, nil)
+	lookupKey := makeStorageItemKey(dao.Version.StoragePrefix, id, nil)
 	if prefix != nil {
 		lookupKey = append(lookupKey, prefix...)
 	}
@@ -357,7 +355,7 @@ func (dao *Simple) Seek(id int32, prefix []byte, f func(k, v []byte)) {
 // SeekAsync sends all storage items matching given prefix to a channel and returns
 // the channel. Resulting keys and values may not be copied.
 func (dao *Simple) SeekAsync(ctx context.Context, id int32, prefix []byte) chan storage.KeyValue {
-	lookupKey := makeStorageItemKey(dao.StoragePrefix, id, nil)
+	lookupKey := makeStorageItemKey(dao.Version.StoragePrefix, id, nil)
 	if prefix != nil {
 		lookupKey = append(lookupKey, prefix...)
 	}
@@ -386,7 +384,7 @@ func (dao *Simple) GetBlock(hash util.Uint256) (*block.Block, error) {
 		return nil, err
 	}
 
-	block, err := block.NewBlockFromTrimmedBytes(dao.stateRootInHeader, b)
+	block, err := block.NewBlockFromTrimmedBytes(dao.Version.StateRootInHeader, b)
 	if err != nil {
 		return nil, err
 	}
@@ -395,9 +393,16 @@ func (dao *Simple) GetBlock(hash util.Uint256) (*block.Block, error) {
 
 // Version represents current dao version.
 type Version struct {
-	Prefix storage.KeyPrefix
-	Value  string
+	StoragePrefix     storage.KeyPrefix
+	StateRootInHeader bool
+	P2PSigExtensions  bool
+	Value             string
 }
+
+const (
+	stateRootInHeaderBit = 1 << iota
+	p2pSigExtensionsBit
+)
 
 // FromBytes decodes v from a byte-slice.
 func (v *Version) FromBytes(data []byte) error {
@@ -413,14 +418,27 @@ func (v *Version) FromBytes(data []byte) error {
 		return nil
 	}
 
+	if len(data) != i+3 {
+		return errors.New("version is invalid")
+	}
+
 	v.Value = string(data[:i])
-	v.Prefix = storage.KeyPrefix(data[i+1])
+	v.StoragePrefix = storage.KeyPrefix(data[i+1])
+	v.StateRootInHeader = data[i+2]&stateRootInHeaderBit != 0
+	v.P2PSigExtensions = data[i+2]&p2pSigExtensionsBit != 0
 	return nil
 }
 
 // Bytes encodes v to a byte-slice.
 func (v *Version) Bytes() []byte {
-	return append([]byte(v.Value), '\x00', byte(v.Prefix))
+	var mask byte
+	if v.StateRootInHeader {
+		mask |= stateRootInHeaderBit
+	}
+	if v.P2PSigExtensions {
+		mask |= p2pSigExtensionsBit
+	}
+	return append([]byte(v.Value), '\x00', byte(v.StoragePrefix), mask)
 }
 
 // GetVersion attempts to get the current version stored in the
@@ -536,7 +554,7 @@ func (dao *Simple) GetTransaction(hash util.Uint256) (*transaction.Transaction, 
 
 // PutVersion stores the given version in the underlying store.
 func (dao *Simple) PutVersion(v Version) error {
-	dao.StoragePrefix = v.Prefix
+	dao.Version = v
 	return dao.Store.Put(storage.SYSVersion.Bytes(), v.Bytes())
 }
 
@@ -622,7 +640,7 @@ func (dao *Simple) DeleteBlock(h util.Uint256, w *io.BufBinWriter) error {
 		return err
 	}
 
-	b, err := block.NewBlockFromTrimmedBytes(dao.stateRootInHeader, bs)
+	b, err := block.NewBlockFromTrimmedBytes(dao.Version.StateRootInHeader, bs)
 	if err != nil {
 		return err
 	}
@@ -641,7 +659,7 @@ func (dao *Simple) DeleteBlock(h util.Uint256, w *io.BufBinWriter) error {
 	for _, tx := range b.Transactions {
 		copy(key[1:], tx.Hash().BytesBE())
 		batch.Delete(key)
-		if dao.p2pSigExtensions {
+		if dao.Version.P2PSigExtensions {
 			for _, attr := range tx.GetAttributes(transaction.ConflictsT) {
 				hash := attr.Value.(*transaction.Conflicts).Hash
 				copy(key[1:], hash.BytesBE())
@@ -689,7 +707,7 @@ func (dao *Simple) StoreAsTransaction(tx *transaction.Transaction, index uint32,
 	if err != nil {
 		return err
 	}
-	if dao.p2pSigExtensions {
+	if dao.Version.P2PSigExtensions {
 		var value []byte
 		for _, attr := range tx.GetAttributes(transaction.ConflictsT) {
 			hash := attr.Value.(*transaction.Conflicts).Hash
@@ -718,7 +736,7 @@ func (dao *Simple) Persist() (int, error) {
 // GetMPTBatch storage changes to be applied to MPT.
 func (dao *Simple) GetMPTBatch() mpt.Batch {
 	var b mpt.Batch
-	dao.Store.MemoryStore.SeekAll([]byte{byte(dao.StoragePrefix)}, func(k, v []byte) {
+	dao.Store.MemoryStore.SeekAll([]byte{byte(dao.Version.StoragePrefix)}, func(k, v []byte) {
 		b.Add(k[1:], v)
 	})
 	return b
